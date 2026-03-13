@@ -1,0 +1,13 @@
+streamlit
+pymupdf
+pytesseract
+pillow
+langchain-core
+langchain-community
+langchain-openai
+langchain-experimental
+sentence-transformers
+faiss-cpu
+rank-bm25
+tiktoken
+#Your code also needs Tesseract OCR installed on your system to read form images in PDFs. 

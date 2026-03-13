@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+
+# virtual environment
+rag_env/
+venv/
+
+# vector databases
+vectorstore_*/
+
+# temporary files
+temp_*.pdf
+
+# editor
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
