@@ -24,7 +24,7 @@ from rank_bm25 import BM25Okapi
 # CONFIG
 # ======================
 
-os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY", "sk-or-v1-xxxx") # change this to your API key or set it in your environment
+os.environ["OPENAI_API_KEY"] = "your-key"
 
 MODEL_ID = "deepseek/deepseek-chat"
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
@@ -64,36 +64,30 @@ prompt = PromptTemplate(
 
 def extract_images_with_ocr(pdf_path):
 
+    doc = fitz.open(pdf_path)
     ocr_data = {}
-    try:
-        with fitz.open(pdf_path) as doc:
-            for i, page in enumerate(doc):
 
-                images = page.get_images(full=True)
+    for i, page in enumerate(doc):
 
-                texts = []
+        images = page.get_images(full=True)
 
-                for img in images:
+        texts = []
 
-                    xref = img[0]
+        for img in images:
 
-                    base_image = doc.extract_image(xref)
+            xref = img[0]
 
-                    image = Image.open(io.BytesIO(base_image["image"]))
+            base_image = doc.extract_image(xref)
 
-                    text = pytesseract.image_to_string(image)
+            image = Image.open(io.BytesIO(base_image["image"]))
 
-                    if text.strip():
-                        texts.append(text)
+            text = pytesseract.image_to_string(image)
 
-                if texts:
-                    ocr_data[i] = "\n".join(texts)
-    except Exception as e:
-        st.warning(
-            f"OCR processing failed or Tesseract is not configured: {e}. "
-            "Proceeding with standard text extraction."
-        )
-        return {}
+            if text.strip():
+                texts.append(text)
+
+        if texts:
+            ocr_data[i] = "\n".join(texts)
 
     return ocr_data
 
@@ -249,10 +243,7 @@ def rerank_docs(query, docs):
     reranker, load_error = load_reranker()
 
     if reranker is None:
-        st.warning(
-            "The reranking model could not be loaded because Windows is low on "
-            "virtual memory. Showing the search results without reranking."
-        )
+        st.session_state.rerank_error = load_error
         return docs[:3]
 
     pairs = [(query, d.page_content) for d in docs]
@@ -302,9 +293,11 @@ def generate_answer(llm, query, docs):
         question=query
     )
 
-    response = llm.invoke(formatted_prompt)
-
-    return response.content
+    try:
+        response = llm.invoke(formatted_prompt)
+        return response.content
+    except Exception as e:
+        return f"⚠️ Error calling LLM: {str(e)}"
 
 
 # ======================
@@ -318,20 +311,12 @@ st.set_page_config(
 
 st.title("📚 AI PDF Assistant")
 
-# Sidebar for API Key configuration
-st.sidebar.title("Configuration")
-api_key = os.environ.get("OPENAI_API_KEY", "")
-if not api_key or api_key == "sk-or-v1-xxxx":
-    user_api_key = st.sidebar.text_input("Enter OpenRouter API Key", type="password")
-    if user_api_key:
-        os.environ["OPENAI_API_KEY"] = user_api_key
-        st.sidebar.success("API Key updated!")
-    else:
-        st.sidebar.warning("Please enter your API Key to enable the AI assistant.")
-
 # chat memory
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+
+if "rerank_error" not in st.session_state:
+    st.session_state.rerank_error = None
 
 uploaded_file = st.file_uploader(
     "Upload a PDF",
@@ -341,65 +326,79 @@ uploaded_file = st.file_uploader(
 if uploaded_file:
 
     pdf_path = f"temp_{uploaded_file.name}"
+
+    with open(pdf_path, "wb") as f:
+        f.write(uploaded_file.getvalue())
+
     vector_dir = f"vectorstore_{uploaded_file.name}"
 
-    # Cache processing to avoid running on every rerun/keystroke
-    if "processed_file" not in st.session_state or st.session_state.processed_file != uploaded_file.name:
-        with open(pdf_path, "wb") as f:
-            f.write(uploaded_file.getvalue())
+    with st.spinner("Processing PDF..."):
 
-        with st.spinner("Processing PDF (OCR & Vector indexing)..."):
-            text_docs = load_pdf_text(pdf_path)
-            ocr_data = extract_images_with_ocr(pdf_path)
-            merged_docs = merge_text_and_ocr(
-                text_docs,
-                ocr_data,
-                pdf_path
-            )
-            chunks = chunk_documents(merged_docs)
-            vectorstore = load_or_create_vectorstore(
-                chunks,
-                vector_dir
-            )
-            bm25 = create_bm25(chunks)
+        text_docs = load_pdf_text(pdf_path)
 
-            # Store in session state
-            st.session_state.vectorstore = vectorstore
-            st.session_state.bm25 = bm25
-            st.session_state.chunks = chunks
-            st.session_state.processed_file = uploaded_file.name
+        ocr_data = extract_images_with_ocr(pdf_path)
 
-        try:
-            os.remove(pdf_path)
-        except Exception:
-            pass
+        merged_docs = merge_text_and_ocr(
+            text_docs,
+            ocr_data,
+            pdf_path
+        )
+
+        chunks = chunk_documents(merged_docs)
+
+        vectorstore = load_or_create_vectorstore(
+            chunks,
+            vector_dir
+        )
+
+        bm25 = create_bm25(chunks)
+
+        llm = load_llm()
 
     st.success("PDF ready!")
 
-    # Verify if API Key is available before showing query input
-    current_key = os.environ.get("OPENAI_API_KEY", "")
-    if not current_key or current_key == "sk-or-v1-xxxx":
-        st.info("Please enter your OpenRouter API Key in the sidebar to ask questions.")
-    else:
-        query = st.text_input("Ask a question")
+    query = st.text_input("Ask a question")
 
-        if query:
-            vectorstore = st.session_state.vectorstore
-            bm25 = st.session_state.bm25
-            chunks = st.session_state.chunks
+    if query:
 
-            with st.spinner("Thinking..."):
-                llm = load_llm()
-                docs = hybrid_search(query, vectorstore, bm25, chunks)
-                docs = rerank_docs(query, docs)
-                answer = generate_answer(llm, query, docs)
+        docs = hybrid_search(query, vectorstore, bm25, chunks)
 
-            st.session_state.chat_history.append({
-                "question": query,
-                "answer": answer
-            })
+        docs = rerank_docs(query, docs)
 
-        # Show the current conversation first, followed by older history.
-        for chat in reversed(st.session_state.chat_history):
-            st.markdown(f"**You:** {chat['question']}")
-            st.markdown(f"**AI:** {chat['answer']}")
+        answer = generate_answer(llm, query, docs)
+
+        st.session_state.chat_history.append({
+            "question": query,
+            "answer": answer
+        })
+
+    # Show the current conversation first, followed by older history.
+    for chat in reversed(st.session_state.chat_history):
+
+        st.markdown(f"**You:** {chat['question']}")
+
+        st.markdown(f"**AI:** {chat['answer']}")
+
+    os.remove(pdf_path)
+
+    if st.session_state.rerank_error is not None:
+        error_msg = str(st.session_state.rerank_error)
+        st.warning(
+            "⚠️ **System Memory Limit Reached (Not a Software Bug)**\n\n"
+            "The PDF Assistant is running, but the advanced **Reranking AI model** could not be loaded because "
+            "Windows is out of virtual memory (paging file space).\n\n"
+            "**What this means:** The app continues to function normally using standard search, but responses may be slightly less precise.\n\n"
+            f"**Technical Details:** `{error_msg}`"
+        )
+        if "1455" in error_msg or "paging file" in error_msg.lower():
+            with st.expander("🛠️ How to fix this OS issue (Windows)"):
+                st.markdown(
+                    "1. Press **Windows Key + R**, type `sysdm.cpl`, and press **Enter**.\n"
+                    "2. Go to the **Advanced** tab, and click **Settings...** under the *Performance* section.\n"
+                    "3. Go to the **Advanced** tab in the new window, and click **Change...** under *Virtual memory*.\n"
+                    "4. **Uncheck** *'Automatically manage paging file size for all drives'*.\n"
+                    "5. Select your **C:** drive, choose **Custom size**, and set:\n"
+                    "   * **Initial size (MB):** `8192`\n"
+                    "   * **Maximum size (MB):** `16384`\n"
+                    "6. **Important:** Click **Set**, then click **OK** on all windows, and **restart your PC**."
+                )
