@@ -24,7 +24,7 @@ from rank_bm25 import BM25Okapi
 # CONFIG
 # ======================
 
-os.environ["OPENAI_API_KEY"] = "sk-or-v1-xxxx" # change this to your API key
+os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY", "sk-or-v1-xxxx") # change this to your API key or set it in your environment
 
 MODEL_ID = "deepseek/deepseek-chat"
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
@@ -140,9 +140,7 @@ def merge_text_and_ocr(text_docs, ocr_data, pdf_path):
 
 def chunk_documents(docs):
 
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
-    )
+    embeddings = load_embeddings()
 
     splitter = SemanticChunker(embeddings)
 
@@ -155,9 +153,7 @@ def chunk_documents(docs):
 
 def load_or_create_vectorstore(chunks, vector_dir):
 
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
-    )
+    embeddings = load_embeddings()
 
     if os.path.exists(vector_dir):
 
@@ -222,15 +218,36 @@ def hybrid_search(query, vectorstore, bm25, docs):
 
 
 # ======================
-# RERANKER
+# MODELS
 # ======================
 
-reranker = CrossEncoder(
-    "cross-encoder/ms-marco-MiniLM-L-6-v2"
-)
+@st.cache_resource(show_spinner="Loading embedding model...")
+def load_embeddings():
+    """Load the embedding model once per Streamlit server process."""
+    return HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
+
+
+@st.cache_resource(show_spinner="Loading reranking model...")
+def load_reranker():
+    """Load the optional reranker lazily so the UI can start under low memory."""
+    try:
+        return CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2"), None
+    except OSError as exc:
+        return None, str(exc)
 
 
 def rerank_docs(query, docs):
+
+    reranker, load_error = load_reranker()
+
+    if reranker is None:
+        st.warning(
+            "The reranking model could not be loaded because Windows is low on "
+            "virtual memory. Showing the search results without reranking."
+        )
+        return docs[:3]
 
     pairs = [(query, d.page_content) for d in docs]
 
@@ -353,7 +370,8 @@ if uploaded_file:
             "answer": answer
         })
 
-    for chat in st.session_state.chat_history:
+    # Show the current conversation first, followed by older history.
+    for chat in reversed(st.session_state.chat_history):
 
         st.markdown(f"**You:** {chat['question']}")
 
